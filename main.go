@@ -22,7 +22,7 @@ import (
 
 var (
 	streams        sync.Map
-	bootstrapPeers = []string{"/ip4/127.0.0.1/tcp/4001/p2p/QmBootstrapPeerID"} // Replace with your bootstrap node details
+	bootstrapPeers = []string{"/ip4/35.200.242.137/tcp/9002/p2p/12D3KooWShhA1HEv3bVnCaUKRdpf8c6dcyAX433ztHnn5p1XVn6D"} // Replace with your bootstrap node details
 )
 
 // DHT and Peer Discovery
