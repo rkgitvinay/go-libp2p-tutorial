@@ -76,12 +76,25 @@ func readData(rw *bufio.ReadWriter, peerID peer.ID) {
 			case len(str) > 5 && str[:5] == "PEER:":
 				// Register received peer ID
 				newPeer := str[5 : len(str)-1]
+				peersMutex.Lock()
+				knownPeers[peer.ID(newPeer)] = struct{}{}
+				peersMutex.Unlock()
 				fmt.Printf("Discovered Peer: %s\n", newPeer)
 			case len(str) > 5 && str[:5] == "FILE:":
 				handleFileReceive(str[5:], rw)
 			default:
 				// Display chat message
 				fmt.Printf("[PEER %s] %s> ", peerID, str)
+
+				// Forward the message to all other connected peers
+				streams.Range(func(key, value interface{}) bool {
+					if key != peerID { // Exclude the original sender
+						peerRW := value.(*bufio.ReadWriter)
+						peerRW.WriteString(fmt.Sprintf("[FORWARDED from %s]: %s", peerID, str))
+						peerRW.Flush()
+					}
+					return true
+				})
 			}
 		}
 	}
