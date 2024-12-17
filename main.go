@@ -3,7 +3,6 @@ package main
 import (
 	"bufio"
 	"context"
-	"crypto/rand"
 	"flag"
 	"fmt"
 	"io"
@@ -15,22 +14,20 @@ import (
 
 	"github.com/libp2p/go-libp2p"
 	dht "github.com/libp2p/go-libp2p-kad-dht"
-	"github.com/libp2p/go-libp2p/core/crypto"
 	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/p2p/discovery/mdns"
-	"github.com/multiformats/go-multiaddr"
 )
 
 var (
 	streams        sync.Map
-	bootstrapPeers = []string{"/ip4/35.200.242.137/tcp/9002/p2p/12D3KooWShhA1HEv3bVnCaUKRdpf8c6dcyAX433ztHnn5p1XVn6D"}
+	bootstrapPeers = []string{"/ip4/127.0.0.1/tcp/4001/p2p/QmBootstrapPeerID"} // Replace with your bootstrap node details
 )
 
-// Peer Discovery with DHT
+// DHT and Peer Discovery
 func setupDHT(ctx context.Context, h host.Host) *dht.IpfsDHT {
-	kadDHT, err := dht.New(ctx, h)
+	kadDHT, err := dht.New(ctx, h, dht.Mode(dht.ModeAuto))
 	if err != nil {
 		log.Fatalf("Failed to create DHT: %v", err)
 	}
@@ -53,7 +50,7 @@ func setupDHT(ctx context.Context, h host.Host) *dht.IpfsDHT {
 	return kadDHT
 }
 
-// MDNS for Local Peer Discovery
+// MDNS for Local Network Discovery
 func startMDNS(h host.Host, serviceTag string) {
 	notifee := &mdnsNotifee{h: h}
 	service := mdns.NewMdnsService(h, serviceTag, notifee)
@@ -93,7 +90,7 @@ func readData(rw *bufio.ReadWriter, peerID peer.ID) {
 	}
 }
 
-// File Broadcast
+// File Broadcasting
 func broadcastFile(filename string) {
 	file, err := os.Open(filename)
 	if err != nil {
@@ -128,45 +125,55 @@ func broadcastFile(filename string) {
 	fmt.Println("File broadcast completed.")
 }
 
+func writeData() {
+	stdReader := bufio.NewReader(os.Stdin)
+	for {
+		fmt.Print("> ")
+		sendData, _ := stdReader.ReadString('\n')
+
+		if len(sendData) > 5 && sendData[:5] == "send:" {
+			broadcastFile(sendData[5 : len(sendData)-1])
+		} else {
+			streams.Range(func(_, value interface{}) bool {
+				rw := value.(*bufio.ReadWriter)
+				rw.WriteString(sendData)
+				rw.Flush()
+				return true
+			})
+		}
+	}
+}
+
+func createHost(ctx context.Context, port int) host.Host {
+	listenAddr := fmt.Sprintf("/ip4/0.0.0.0/tcp/%d", port)
+	h, err := libp2p.New(
+		libp2p.ListenAddrStrings(listenAddr),
+		libp2p.EnableAutoRelay(),
+		libp2p.EnableRelay(),
+		libp2p.NATPortMap(),
+	)
+	if err != nil {
+		log.Fatalf("Failed to create host: %v", err)
+	}
+	return h
+}
+
 func main() {
 	sourcePort := flag.Int("sp", 4001, "Source port")
 	flag.Parse()
 
 	ctx := context.Background()
-	prvKey, _, _ := crypto.GenerateKeyPairWithReader(crypto.RSA, 2048, rand.Reader)
+	host := createHost(ctx, *sourcePort)
 
-	// Create a Libp2p host
-	host, _ := libp2p.New(
-		libp2p.Identity(prvKey),
-		libp2p.ListenAddrs(multiaddr.StringCast(fmt.Sprintf("/ip4/0.0.0.0/tcp/%d", *sourcePort))),
-	)
-	fmt.Printf("Listening on port: %d\n", *sourcePort)
-
-	// DHT and mDNS Discovery
+	// Start Peer Discovery
 	setupDHT(ctx, host)
 	startMDNS(host, "libp2p-app")
 
-	// Set up stream handler
+	// Set Stream Handler
 	host.SetStreamHandler("/chat/1.0.0", handleStream)
+	fmt.Printf("Listening on port %d. Host ID: %s\n", *sourcePort, host.ID().String())
 
-	// User Interaction
-	go func() {
-		stdReader := bufio.NewReader(os.Stdin)
-		for {
-			fmt.Print("> ")
-			sendData, _ := stdReader.ReadString('\n')
-			if len(sendData) > 5 && sendData[:5] == "send:" {
-				broadcastFile(sendData[5 : len(sendData)-1])
-			} else {
-				streams.Range(func(_, value interface{}) bool {
-					rw := value.(*bufio.ReadWriter)
-					rw.WriteString(sendData)
-					rw.Flush()
-					return true
-				})
-			}
-		}
-	}()
-
+	// Interactive Prompt
+	go writeData()
 	select {}
 }
