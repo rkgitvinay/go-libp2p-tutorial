@@ -136,6 +136,48 @@ func handleFileReceive(metadata string, rw *bufio.ReadWriter) {
 	}
 
 	fmt.Printf("File %s received and saved successfully.\n", newFileName)
+
+	// Forward the file to all other connected peers
+	forwardFile(newFileName, filesize, rw)
+}
+
+func forwardFile(filename string, filesize int64, senderRW *bufio.ReadWriter) {
+	fmt.Printf("Forwarding file: %s (%d bytes)\n", filename, filesize)
+
+	file, err := os.Open(filename)
+	if err != nil {
+		fmt.Printf("Failed to open file for forwarding: %v\n", err)
+		return
+	}
+	defer file.Close()
+
+	// Send file metadata and data to all connected peers except the sender
+	streams.Range(func(key, value interface{}) bool {
+		peerRW := value.(*bufio.ReadWriter)
+		if peerRW != senderRW { // Avoid sending back to the sender
+			// Send metadata
+			peerRW.WriteString(fmt.Sprintf("FILE:%s %d\n", filepath.Base(filename), filesize))
+			peerRW.Flush()
+
+			// Send file data
+			buf := make([]byte, 4096)
+			for {
+				n, err := file.Read(buf)
+				if err != nil {
+					if err == io.EOF {
+						break
+					}
+					fmt.Printf("Error reading file: %v\n", err)
+					return false
+				}
+				peerRW.Write(buf[:n])
+				peerRW.Flush()
+			}
+		}
+		return true
+	})
+
+	fmt.Printf("File %s forwarded successfully.\n", filename)
 }
 
 func writeData() {
@@ -276,6 +318,8 @@ func main() {
 		}
 
 		fmt.Printf("Run './chat -d /ip4/127.0.0.1/tcp/%v/p2p/%s' on another console.\n", port, host.ID())
+		fmt.Printf("OR\n")
+		fmt.Printf("Run 'go run main.go -d /ip4/127.0.0.1/tcp/%v/p2p/%s' on another console.\n", port, host.ID())
 		fmt.Println("Waiting for incoming connections...")
 
 		select {}
