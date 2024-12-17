@@ -3,94 +3,129 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/rand"
 	"flag"
 	"fmt"
 	"io"
 	"log"
+	mrand "math/rand"
 	"os"
 	"path/filepath"
 	"sync"
-	"time"
 
 	"github.com/libp2p/go-libp2p"
-	dht "github.com/libp2p/go-libp2p-kad-dht"
-	"github.com/libp2p/go-libp2p/core/host"
+	"github.com/libp2p/go-libp2p/core/crypto"
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
-	"github.com/libp2p/go-libp2p/p2p/discovery/mdns"
+	"github.com/libp2p/go-libp2p/core/peerstore"
+
+	"github.com/multiformats/go-multiaddr"
 )
 
-var (
-	streams        sync.Map
-	bootstrapPeers = []string{"/ip4/35.200.242.137/tcp/9002/p2p/12D3KooWShhA1HEv3bVnCaUKRdpf8c6dcyAX433ztHnn5p1XVn6D"} // Replace with your bootstrap node details
-)
+var streams sync.Map // Tracks streams for connected peers
 
-// DHT and Peer Discovery
-func setupDHT(ctx context.Context, h host.Host) *dht.IpfsDHT {
-	kadDHT, err := dht.New(ctx, h, dht.Mode(dht.ModeAuto))
-	if err != nil {
-		log.Fatalf("Failed to create DHT: %v", err)
-	}
-
-	if err := kadDHT.Bootstrap(ctx); err != nil {
-		log.Fatalf("Failed to bootstrap DHT: %v", err)
-	}
-
-	for _, addr := range bootstrapPeers {
-		peerInfo, err := peer.AddrInfoFromString(addr)
-		if err != nil {
-			continue
-		}
-		h.Peerstore().AddAddrs(peerInfo.ID, peerInfo.Addrs, time.Hour)
-		if err := h.Connect(ctx, *peerInfo); err == nil {
-			fmt.Printf("Connected to bootstrap node: %s\n", addr)
-		}
-	}
-
-	return kadDHT
-}
-
-// MDNS for Local Network Discovery
-func startMDNS(h host.Host, serviceTag string) {
-	notifee := &mdnsNotifee{h: h}
-	service := mdns.NewMdnsService(h, serviceTag, notifee)
-	if err := service.Start(); err != nil {
-		log.Fatalf("Failed to start MDNS: %v", err)
-	}
-	fmt.Println("mDNS peer discovery started...")
-}
-
-type mdnsNotifee struct {
-	h host.Host
-}
-
-func (n *mdnsNotifee) HandlePeerFound(pi peer.AddrInfo) {
-	fmt.Printf("Discovered new peer: %s\n", pi.ID.String())
-	n.h.Connect(context.Background(), pi)
-}
-
-// Stream Handlers
 func handleStream(s network.Stream) {
 	peerID := s.Conn().RemotePeer()
 	log.Printf("New stream from: %s\n", peerID)
+
+	// Create a buffered read-writer for the stream
 	rw := bufio.NewReadWriter(bufio.NewReader(s), bufio.NewWriter(s))
+
+	// Store the stream for bidirectional communication
 	streams.Store(peerID, rw)
+
+	// Handle reading and writing in separate goroutines
 	go readData(rw, peerID)
+	go writeData()
+
+	// Keep the stream open
 }
 
 func readData(rw *bufio.ReadWriter, peerID peer.ID) {
 	for {
-		str, err := rw.ReadString('\n')
-		if err != nil {
-			log.Printf("Peer %s disconnected.\n", peerID)
+		str, _ := rw.ReadString('\n')
+
+		if str == "" {
+			log.Printf("Connection with peer %s closed.\n", peerID)
 			streams.Delete(peerID)
 			return
 		}
-		fmt.Printf("[PEER %s] %s", peerID.String(), str)
+
+		if str != "\n" {
+			if len(str) > 5 && str[:5] == "FILE:" {
+				handleFileReceive(str[5:], rw)
+			} else {
+				// Display chat message
+				fmt.Printf("[PEER %s] %s> ", peerID, str)
+			}
+		}
 	}
 }
 
-// File Broadcasting
+func handleFileReceive(metadata string, rw *bufio.ReadWriter) {
+	// Extract filename and size from metadata
+	var filename string
+	var filesize int64
+	fmt.Sscanf(metadata, "%s %d", &filename, &filesize)
+
+	newFileName := "./received/" + filepath.Base(filename)
+	fmt.Printf("Receiving file: %s (%d bytes)\n", filename, filesize)
+
+	file, err := os.Create(newFileName)
+	if err != nil {
+		fmt.Printf("Failed to create file: %v\n", err)
+		return
+	}
+	defer file.Close()
+
+	received := int64(0)
+	buf := make([]byte, 4096)
+
+	for received < filesize {
+		n, err := rw.Read(buf)
+		if err != nil {
+			fmt.Printf("Error reading file: %v\n", err)
+			return
+		}
+
+		_, err = file.Write(buf[:n])
+		if err != nil {
+			fmt.Printf("Error writing file: %v\n", err)
+			return
+		}
+
+		received += int64(n)
+	}
+
+	fmt.Printf("File %s received and saved successfully.\n", newFileName)
+}
+
+func writeData() {
+	stdReader := bufio.NewReader(os.Stdin)
+
+	for {
+		fmt.Print("> ")
+		sendData, err := stdReader.ReadString('\n')
+		if err != nil {
+			panic(err)
+		}
+
+		if len(sendData) > 5 && sendData[:5] == "send:" {
+			// Broadcast file to all connected peers
+			filename := sendData[5 : len(sendData)-1]
+			broadcastFile(filename)
+		} else {
+			// Broadcast chat message to all peers
+			streams.Range(func(key, value interface{}) bool {
+				peerRW := value.(*bufio.ReadWriter)
+				peerRW.WriteString(fmt.Sprintf("%s\n", sendData))
+				peerRW.Flush()
+				return true
+			})
+		}
+	}
+}
+
 func broadcastFile(filename string) {
 	file, err := os.Open(filename)
 	if err != nil {
@@ -99,22 +134,31 @@ func broadcastFile(filename string) {
 	}
 	defer file.Close()
 
-	info, _ := file.Stat()
+	info, err := file.Stat()
+	if err != nil {
+		fmt.Printf("Failed to get file info: %v\n", err)
+		return
+	}
 	filesize := info.Size()
 
-	streams.Range(func(_, value interface{}) bool {
+	// Send file metadata and data to all connected peers
+	streams.Range(func(key, value interface{}) bool {
 		rw := value.(*bufio.ReadWriter)
-		rw.WriteString(fmt.Sprintf("FILE:%s %d\n", filepath.Base(filename), filesize))
+
+		// Send metadata
+		rw.WriteString(fmt.Sprintf("FILE:%s %d\n", filename, filesize))
 		rw.Flush()
 
+		// Send file data
 		buf := make([]byte, 4096)
 		for {
 			n, err := file.Read(buf)
-			if err != nil && err != io.EOF {
+			if err != nil {
+				if err == io.EOF {
+					break
+				}
+				fmt.Printf("Error reading file: %v\n", err)
 				return false
-			}
-			if n == 0 {
-				break
 			}
 			rw.Write(buf[:n])
 			rw.Flush()
@@ -122,58 +166,94 @@ func broadcastFile(filename string) {
 		return true
 	})
 
-	fmt.Println("File broadcast completed.")
-}
-
-func writeData() {
-	stdReader := bufio.NewReader(os.Stdin)
-	for {
-		fmt.Print("> ")
-		sendData, _ := stdReader.ReadString('\n')
-
-		if len(sendData) > 5 && sendData[:5] == "send:" {
-			broadcastFile(sendData[5 : len(sendData)-1])
-		} else {
-			streams.Range(func(_, value interface{}) bool {
-				rw := value.(*bufio.ReadWriter)
-				rw.WriteString(sendData)
-				rw.Flush()
-				return true
-			})
-		}
-	}
-}
-
-func createHost(ctx context.Context, port int) host.Host {
-	listenAddr := fmt.Sprintf("/ip4/0.0.0.0/tcp/%d", port)
-	h, err := libp2p.New(
-		libp2p.ListenAddrStrings(listenAddr),
-		libp2p.EnableAutoRelay(),
-		libp2p.EnableRelay(),
-		libp2p.NATPortMap(),
-	)
-	if err != nil {
-		log.Fatalf("Failed to create host: %v", err)
-	}
-	return h
+	fmt.Printf("File %s broadcasted successfully.\n", filename)
 }
 
 func main() {
-	sourcePort := flag.Int("sp", 4001, "Source port")
+	sourcePort := flag.Int("sp", 0, "Source port number")
+	dest := flag.String("d", "", "Destination multiaddr string")
+	help := flag.Bool("help", false, "Display help")
+	debug := flag.Bool("debug", false, "Debug generates the same node ID on every execution")
+
 	flag.Parse()
 
-	ctx := context.Background()
-	host := createHost(ctx, *sourcePort)
+	if *help {
+		fmt.Printf("This program demonstrates a multi-node p2p chat and file-sharing application using libp2p\n\n")
+		fmt.Println("Usage:")
+		fmt.Println("  Listener: ./chat -sp <SOURCE_PORT>")
+		fmt.Println("  Dialer: ./chat -d <MULTIADDR>")
+		os.Exit(0)
+	}
 
-	// Start Peer Discovery
-	setupDHT(ctx, host)
-	startMDNS(host, "libp2p-app")
+	var r io.Reader
+	if *debug {
+		r = mrand.New(mrand.NewSource(int64(*sourcePort)))
+	} else {
+		r = rand.Reader
+	}
 
-	// Set Stream Handler
+	prvKey, _, err := crypto.GenerateKeyPairWithReader(crypto.RSA, 2048, r)
+	if err != nil {
+		panic(err)
+	}
+
+	sourceMultiAddr, _ := multiaddr.NewMultiaddr(fmt.Sprintf("/ip4/0.0.0.0/tcp/%d", *sourcePort))
+
+	host, err := libp2p.New(
+		// context.Background(),
+		libp2p.ListenAddrs(sourceMultiAddr),
+		libp2p.Identity(prvKey),
+	)
+
+	if err != nil {
+		panic(err)
+	}
+
 	host.SetStreamHandler("/chat/1.0.0", handleStream)
-	fmt.Printf("Listening on port %d. Host ID: %s\n", *sourcePort, host.ID().String())
 
-	// Interactive Prompt
-	go writeData()
-	select {}
+	if *dest == "" {
+		// Listener mode
+		var port string
+		for _, la := range host.Network().ListenAddresses() {
+			if p, err := la.ValueForProtocol(multiaddr.P_TCP); err == nil {
+				port = p
+				break
+			}
+		}
+
+		if port == "" {
+			panic("Was not able to find actual local port")
+		}
+
+		fmt.Printf("Run './chat -d /ip4/127.0.0.1/tcp/%v/p2p/%s' on another console.\n", port, host.ID())
+		fmt.Println("Waiting for incoming connections...")
+
+		select {}
+	} else {
+		// Dialer mode
+		maddr, err := multiaddr.NewMultiaddr(*dest)
+		if err != nil {
+			log.Fatalln(err)
+		}
+
+		info, err := peer.AddrInfoFromP2pAddr(maddr)
+		if err != nil {
+			log.Fatalln(err)
+		}
+
+		host.Peerstore().AddAddrs(info.ID, info.Addrs, peerstore.PermanentAddrTTL)
+
+		s, err := host.NewStream(context.Background(), info.ID, "/chat/1.0.0")
+		if err != nil {
+			panic(err)
+		}
+
+		rw := bufio.NewReadWriter(bufio.NewReader(s), bufio.NewWriter(s))
+		streams.Store(info.ID, rw)
+
+		go writeData()
+		go readData(rw, info.ID)
+
+		select {}
+	}
 }
