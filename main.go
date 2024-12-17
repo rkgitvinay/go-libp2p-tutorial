@@ -22,11 +22,20 @@ import (
 	"github.com/multiformats/go-multiaddr"
 )
 
-var streams sync.Map // Tracks streams for connected peers
+var (
+	streams    sync.Map                     // Existing map for peer streams
+	knownPeers = make(map[peer.ID]struct{}) // Tracks known peer IDs
+	peersMutex sync.Mutex
+)
 
 func handleStream(s network.Stream) {
 	peerID := s.Conn().RemotePeer()
 	log.Printf("New stream from: %s\n", peerID)
+
+	// Add peer to known peers
+	peersMutex.Lock()
+	knownPeers[peerID] = struct{}{}
+	peersMutex.Unlock()
 
 	// Create a buffered read-writer for the stream
 	rw := bufio.NewReadWriter(bufio.NewReader(s), bufio.NewWriter(s))
@@ -48,13 +57,29 @@ func readData(rw *bufio.ReadWriter, peerID peer.ID) {
 		if str == "" {
 			log.Printf("Connection with peer %s closed.\n", peerID)
 			streams.Delete(peerID)
+			peersMutex.Lock()
+			delete(knownPeers, peerID) // Remove peer from knownPeers
+			peersMutex.Unlock()
 			return
 		}
 
 		if str != "\n" {
-			if len(str) > 5 && str[:5] == "FILE:" {
+			switch {
+			case str == "LIST\n":
+				// Respond with all known peer IDs
+				peersMutex.Lock()
+				for p := range knownPeers {
+					rw.WriteString(fmt.Sprintf("PEER:%s\n", p))
+				}
+				rw.Flush()
+				peersMutex.Unlock()
+			case len(str) > 5 && str[:5] == "PEER:":
+				// Register received peer ID
+				newPeer := str[5 : len(str)-1]
+				fmt.Printf("Discovered Peer: %s\n", newPeer)
+			case len(str) > 5 && str[:5] == "FILE:":
 				handleFileReceive(str[5:], rw)
-			} else {
+			default:
 				// Display chat message
 				fmt.Printf("[PEER %s] %s> ", peerID, str)
 			}
@@ -110,11 +135,23 @@ func writeData() {
 			panic(err)
 		}
 
-		if len(sendData) > 5 && sendData[:5] == "send:" {
+		sendData = sendData[:len(sendData)-1] // Trim newline character
+
+		switch {
+		case sendData == "list":
+			// Send LIST command to all peers
+			fmt.Println("Requesting list of connected peers...")
+			streams.Range(func(key, value interface{}) bool {
+				peerRW := value.(*bufio.ReadWriter)
+				peerRW.WriteString("LIST\n")
+				peerRW.Flush()
+				return true
+			})
+		case len(sendData) > 5 && sendData[:5] == "send:":
 			// Broadcast file to all connected peers
-			filename := sendData[5 : len(sendData)-1]
+			filename := sendData[5:]
 			broadcastFile(filename)
-		} else {
+		default:
 			// Broadcast chat message to all peers
 			streams.Range(func(key, value interface{}) bool {
 				peerRW := value.(*bufio.ReadWriter)
