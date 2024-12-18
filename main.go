@@ -32,8 +32,12 @@ var (
 	host       libHost.Host
 	peerFiles  = make(map[string][]FileMetadata) // Map of peer ID to their files
 	localFiles []FileMetadata                    // Files on this node
-	filesMutex sync.Mutex                        // Mutex to protect file lists
 	filesDir   = "./shared"                      // Directory to store uploaded files
+)
+
+var (
+	globalFileMap = make(map[string][]FileMetadata) // Global map of peer ID to their files
+	filesMutex    sync.Mutex                        // Mutex to protect global file map
 )
 
 func handleStream(s network.Stream) {
@@ -42,7 +46,6 @@ func handleStream(s network.Stream) {
 	rw := bufio.NewReadWriter(bufio.NewReader(s), bufio.NewWriter(s))
 
 	go func() {
-		// Continuously read data from the stream
 		for {
 			str, err := rw.ReadString('\n')
 			if err != nil {
@@ -50,26 +53,72 @@ func handleStream(s network.Stream) {
 				return
 			}
 			if str != "" {
-				var peerFilesReceived []FileMetadata
-				err := json.Unmarshal([]byte(str), &peerFilesReceived)
+				var receivedGlobalMap map[string][]FileMetadata
+				err := json.Unmarshal([]byte(str), &receivedGlobalMap)
 				if err != nil {
-					log.Printf("Error unmarshaling peer files: %v", err)
+					log.Printf("Error unmarshaling global map: %v", err)
 					continue
 				}
 
-				// Update the peerFiles map with received data
-				peerID := s.Conn().RemotePeer().String()
+				// Update the global file map
 				filesMutex.Lock()
-				peerFiles[peerID] = peerFilesReceived
+				for peerID, files := range receivedGlobalMap {
+					globalFileMap[peerID] = files
+				}
 				filesMutex.Unlock()
 
-				log.Printf("Updated files from peer %s: %v", peerID, peerFilesReceived)
+				log.Printf("Updated global file map: %v", globalFileMap)
 
-				// Broadcast the received metadata to all other connected peers
-				broadcastToPeers(peerID, peerFilesReceived)
+				// Broadcast the updated global map to all other peers
+				propagateGlobalMap(s.Conn().RemotePeer().String(), receivedGlobalMap)
 			}
 		}
 	}()
+}
+
+func propagateGlobalMap(senderID string, updatedGlobalMap map[string][]FileMetadata) {
+	globalMapJSON, _ := json.Marshal(updatedGlobalMap)
+
+	for _, conn := range host.Network().Conns() {
+		peerID := conn.RemotePeer().String()
+		if peerID == senderID {
+			continue // Skip broadcasting back to the sender
+		}
+
+		stream, err := host.NewStream(context.Background(), conn.RemotePeer(), "/fileshare/1.0.0")
+		if err != nil {
+			log.Printf("Failed to open stream to peer %s: %v", peerID, err)
+			continue
+		}
+
+		rw := bufio.NewReadWriter(bufio.NewReader(stream), bufio.NewWriter(stream))
+		_, err = rw.WriteString(fmt.Sprintf("%s\n", globalMapJSON))
+		if err != nil {
+			log.Printf("Failed to send global map to peer %s: %v", peerID, err)
+		}
+		_ = rw.Flush()
+	}
+}
+
+func broadcastGlobalMap() {
+	filesMutex.Lock()
+	globalMapJSON, _ := json.Marshal(globalFileMap)
+	filesMutex.Unlock()
+
+	for _, conn := range host.Network().Conns() {
+		stream, err := host.NewStream(context.Background(), conn.RemotePeer(), "/fileshare/1.0.0")
+		if err != nil {
+			log.Printf("Failed to open stream to peer %s: %v", conn.RemotePeer().String(), err)
+			continue
+		}
+
+		rw := bufio.NewReadWriter(bufio.NewReader(stream), bufio.NewWriter(stream))
+		_, err = rw.WriteString(fmt.Sprintf("%s\n", globalMapJSON))
+		if err != nil {
+			log.Printf("Failed to send global map to peer %s: %v", conn.RemotePeer().String(), err)
+		}
+		_ = rw.Flush()
+	}
 }
 
 func broadcastToPeers(senderID string, files []FileMetadata) {
@@ -198,12 +247,19 @@ func uploadFile(w http.ResponseWriter, r *http.Request) {
 	// Add to local files
 	filesMutex.Lock()
 	localFiles = append(localFiles, FileMetadata{Name: header.Filename, Size: size})
+	globalFileMap[host.ID().String()] = localFiles
 	filesMutex.Unlock()
 
-	// Broadcast the updated metadata to all peers
-	broadcastFileMetadata()
+	// Broadcast the updated global map
+	broadcastGlobalMap()
 
 	fmt.Fprintf(w, "File uploaded successfully: %s", header.Filename)
+}
+
+func getGlobalMap(w http.ResponseWriter, r *http.Request) {
+	filesMutex.Lock()
+	defer filesMutex.Unlock()
+	json.NewEncoder(w).Encode(globalFileMap)
 }
 
 func getFiles(w http.ResponseWriter, r *http.Request) {
@@ -229,7 +285,8 @@ func startWebInterface(port int) {
 	})
 	http.HandleFunc("/upload", uploadFile)
 	http.HandleFunc("/files", getFiles)
-	http.HandleFunc("/peers", getPeersAndFiles)
+	http.HandleFunc("/peers", getGlobalMap)
+	http.HandleFunc("/global", getGlobalMap) // New endpoint
 
 	addr := fmt.Sprintf(":%d", port)
 	log.Printf("Starting web interface at http://localhost%s\n", addr)
