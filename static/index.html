@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>P2P File Sharing</title>
+    <style>
+        body { font-family: Arial, sans-serif; }
+        #files, #peers { margin: 20px 0; }
+    </style>
+</head>
+<body>
+    <h1>P2P File Sharing</h1>
+    <h2>Upload File</h2>
+    <form id="uploadForm">
+        <input type="file" name="file" required />
+        <button type="submit">Upload</button>
+    </form>
+    <h2>Local Files</h2>
+    <ul id="files"></ul>
+    <h2>Peers and Their Files</h2>
+    <ul id="peers"></ul>
+
+    <script>
+        async function fetchFiles() {
+            const res = await fetch('/files');
+            const files = await res.json();
+            const fileList = document.getElementById('files');
+            fileList.innerHTML = '';
+            files.forEach(file => {
+                const li = document.createElement('li');
+                li.textContent = `${file.name} (${file.size} bytes)`;
+                fileList.appendChild(li);
+            });
+        }
+
+        async function fetchPeers() {
+            const res = await fetch('/peers');
+            const peers = await res.json();
+            const peerList = document.getElementById('peers');
+            peerList.innerHTML = '';
+            for (const [peer, files] of Object.entries(peers)) {
+                const li = document.createElement('li');
+                li.textContent = `Peer: ${peer}`;
+                const ul = document.createElement('ul');
+                files.forEach(file => {
+                    const fileLi = document.createElement('li');
+                    fileLi.textContent = `${file.name} (${file.size} bytes)`;
+                    ul.appendChild(fileLi);
+                });
+                li.appendChild(ul);
+                peerList.appendChild(li);
+            }
+        }
+
+        document.getElementById('uploadForm').addEventListener('submit', async e => {
+            e.preventDefault();
+            const formData = new FormData(e.target);
+            await fetch('/upload', { method: 'POST', body: formData });
+            fetchFiles();
+        });
+
+        fetchFiles();
+        fetchPeers();
+        setInterval(fetchPeers, 5000); // Refresh peer data every 5 seconds
+    </script>
+</body>
+</html>
