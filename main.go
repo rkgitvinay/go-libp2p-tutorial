@@ -40,6 +40,17 @@ var (
 	filesMutex    sync.Mutex                        // Mutex to protect global file map
 )
 
+// Add these new types to handle file transfer
+type FileRequest struct {
+	FileName string `json:"filename"`
+}
+
+type FileResponse struct {
+	Success bool   `json:"success"`
+	Message string `json:"message"`
+	Size    int64  `json:"size,omitempty"`
+}
+
 func handleStream(s network.Stream) {
 	log.Printf("Established stream with peer: %s\n", s.Conn().RemotePeer().String())
 
@@ -74,6 +85,199 @@ func handleStream(s network.Stream) {
 			}
 		}
 	}()
+}
+
+// Handle incoming file requests
+func handleFileRequest(s network.Stream) {
+	rw := bufio.NewReadWriter(bufio.NewReader(s), bufio.NewWriter(s))
+
+	// Read the file request
+	reqData, err := rw.ReadString('\n')
+	if err != nil {
+		log.Printf("Error reading file request: %v", err)
+		s.Close()
+		return
+	}
+
+	var fileReq FileRequest
+	if err := json.Unmarshal([]byte(reqData), &fileReq); err != nil {
+		log.Printf("Error unmarshaling file request: %v", err)
+		s.Close()
+		return
+	}
+
+	// Check if we have the file
+	filePath := filepath.Join(filesDir, fileReq.FileName)
+	fileInfo, err := os.Stat(filePath)
+
+	response := FileResponse{}
+	if err != nil {
+		response.Success = false
+		response.Message = "File not found"
+	} else {
+		response.Success = true
+		response.Message = "File found"
+		response.Size = fileInfo.Size()
+	}
+
+	// Send response
+	respData, _ := json.Marshal(response)
+	rw.WriteString(fmt.Sprintf("%s\n", respData))
+	rw.Flush()
+
+	s.Close()
+}
+
+// Handle actual file transfer
+func handleFileTransfer(s network.Stream) {
+	fileName := filepath.Base(s.Conn().RemoteMultiaddr().String())
+	filePath := filepath.Join(filesDir, fileName)
+
+	file, err := os.Open(filePath)
+	if err != nil {
+		log.Printf("Error opening file: %v", err)
+		s.Close()
+		return
+	}
+	defer file.Close()
+
+	// Send the file
+	_, err = io.Copy(s, file)
+	if err != nil {
+		log.Printf("Error sending file: %v", err)
+	}
+
+	s.Close()
+}
+
+// Function to download a file from a peer
+func downloadFile(peerID string, fileName string) error {
+
+	// First check if trying to download from self
+	if peerID == host.ID().String() {
+		// If it's a local file, just copy it to downloads directory
+		sourcePath := filepath.Join(filesDir, fileName)
+		downloadDir := "./received"
+		targetPath := filepath.Join(downloadDir, fileName)
+
+		// Check if source file exists
+		if _, err := os.Stat(sourcePath); os.IsNotExist(err) {
+			return fmt.Errorf("file not found in local shared directory")
+		}
+
+		// Create downloads directory if it doesn't exist
+		os.MkdirAll(downloadDir, os.ModePerm)
+
+		// Copy the file
+		source, err := os.Open(sourcePath)
+		if err != nil {
+			return fmt.Errorf("failed to open source file: %v", err)
+		}
+		defer source.Close()
+
+		destination, err := os.Create(targetPath)
+		if err != nil {
+			return fmt.Errorf("failed to create destination file: %v", err)
+		}
+		defer destination.Close()
+
+		_, err = io.Copy(destination, source)
+		if err != nil {
+			return fmt.Errorf("failed to copy file: %v", err)
+		}
+
+		return nil
+	}
+
+	// Find peer info
+	peerIDObj, err := peer.Decode(peerID)
+	if err != nil {
+		return fmt.Errorf("invalid peer ID: %v", err)
+	}
+
+	// Open stream for file request
+	ctx := context.Background()
+	requestStream, err := host.NewStream(ctx, peerIDObj, "/filerequest/1.0.0")
+	if err != nil {
+		return fmt.Errorf("failed to open request stream: %v", err)
+	}
+
+	// Send file request
+	rw := bufio.NewReadWriter(bufio.NewReader(requestStream), bufio.NewWriter(requestStream))
+	request := FileRequest{FileName: fileName}
+	reqData, _ := json.Marshal(request)
+	rw.WriteString(fmt.Sprintf("%s\n", reqData))
+	rw.Flush()
+
+	// Read response
+	respData, err := rw.ReadString('\n')
+	if err != nil {
+		return fmt.Errorf("failed to read response: %v", err)
+	}
+
+	var response FileResponse
+	if err := json.Unmarshal([]byte(respData), &response); err != nil {
+		return fmt.Errorf("failed to parse response: %v", err)
+	}
+
+	if !response.Success {
+		return fmt.Errorf("peer response: %s", response.Message)
+	}
+
+	requestStream.Close()
+
+	// Open stream for file transfer
+	transferStream, err := host.NewStream(ctx, peerIDObj, "/filetransfer/1.0.0")
+	if err != nil {
+		return fmt.Errorf("failed to open transfer stream: %v", err)
+	}
+	defer transferStream.Close()
+
+	// Create download directory if it doesn't exist
+	downloadDir := "./received"
+	os.MkdirAll(downloadDir, os.ModePerm)
+
+	// Create the file
+	filePath := filepath.Join(downloadDir, fileName)
+	file, err := os.Create(filePath)
+	if err != nil {
+		return fmt.Errorf("failed to create file: %v", err)
+	}
+	defer file.Close()
+
+	// Receive the file
+	_, err = io.Copy(file, transferStream)
+	if err != nil {
+		return fmt.Errorf("failed to save file: %v", err)
+	}
+
+	return nil
+}
+
+// Add new HTTP handler for initiating downloads
+func handleDownload(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Only POST is supported", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var downloadRequest struct {
+		PeerID   string `json:"peer_id"`
+		FileName string `json:"file_name"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&downloadRequest); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	err := downloadFile(downloadRequest.PeerID, downloadRequest.FileName)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	fmt.Fprintf(w, "File downloaded successfully")
 }
 
 func propagateGlobalMap(senderID string, updatedGlobalMap map[string][]FileMetadata) {
@@ -288,6 +492,8 @@ func startWebInterface(port int) {
 	http.HandleFunc("/peers", getGlobalMap)
 	http.HandleFunc("/global", getGlobalMap) // New endpoint
 
+	http.HandleFunc("/download", handleDownload)
+
 	addr := fmt.Sprintf(":%d", port)
 	log.Printf("Starting web interface at http://localhost%s\n", addr)
 	log.Fatal(http.ListenAndServe(addr, nil))
@@ -326,6 +532,10 @@ func main() {
 
 	// Set stream handler for the file-sharing protocol
 	host.SetStreamHandler("/fileshare/1.0.0", handleStream)
+
+	// Add these new protocol handlers
+	host.SetStreamHandler("/filerequest/1.0.0", handleFileRequest)
+	host.SetStreamHandler("/filetransfer/1.0.0", handleFileTransfer)
 
 	// Connect to destination peer if provided
 	if *dest != "" {
