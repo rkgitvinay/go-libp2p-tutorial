@@ -130,9 +130,25 @@ func handleFileRequest(s network.Stream) {
 
 // Handle actual file transfer
 func handleFileTransfer(s network.Stream) {
-	fileName := filepath.Base(s.Conn().RemoteMultiaddr().String())
-	filePath := filepath.Join(filesDir, fileName)
+	// Read the file request first
+	rw := bufio.NewReadWriter(bufio.NewReader(s), bufio.NewWriter(s))
 
+	reqData, err := rw.ReadString('\n')
+	if err != nil {
+		log.Printf("Error reading file request: %v", err)
+		s.Close()
+		return
+	}
+
+	var fileReq FileRequest
+	if err := json.Unmarshal([]byte(reqData), &fileReq); err != nil {
+		log.Printf("Error unmarshaling file request: %v", err)
+		s.Close()
+		return
+	}
+
+	// Open the requested file
+	filePath := filepath.Join(filesDir, fileReq.FileName)
 	file, err := os.Open(filePath)
 	if err != nil {
 		log.Printf("Error opening file: %v", err)
@@ -141,7 +157,7 @@ func handleFileTransfer(s network.Stream) {
 	}
 	defer file.Close()
 
-	// Send the file
+	// Send the file content
 	_, err = io.Copy(s, file)
 	if err != nil {
 		log.Printf("Error sending file: %v", err)
@@ -158,43 +174,21 @@ func downloadFile(peerID string, fileName string) error {
 		return fmt.Errorf("invalid peer ID: %v", err)
 	}
 
-	// Open stream for file request
-	ctx := context.Background()
-	requestStream, err := host.NewStream(ctx, peerIDObj, "/filerequest/1.0.0")
-	if err != nil {
-		return fmt.Errorf("failed to open request stream: %v", err)
-	}
-
-	// Send file request
-	rw := bufio.NewReadWriter(bufio.NewReader(requestStream), bufio.NewWriter(requestStream))
-	request := FileRequest{FileName: fileName}
-	reqData, _ := json.Marshal(request)
-	rw.WriteString(fmt.Sprintf("%s\n", reqData))
-	rw.Flush()
-
-	// Read response
-	respData, err := rw.ReadString('\n')
-	if err != nil {
-		return fmt.Errorf("failed to read response: %v", err)
-	}
-
-	var response FileResponse
-	if err := json.Unmarshal([]byte(respData), &response); err != nil {
-		return fmt.Errorf("failed to parse response: %v", err)
-	}
-
-	if !response.Success {
-		return fmt.Errorf("peer response: %s", response.Message)
-	}
-
-	requestStream.Close()
-
 	// Open stream for file transfer
+	ctx := context.Background()
 	transferStream, err := host.NewStream(ctx, peerIDObj, "/filetransfer/1.0.0")
 	if err != nil {
 		return fmt.Errorf("failed to open transfer stream: %v", err)
 	}
 	defer transferStream.Close()
+
+	// Send file request
+	request := FileRequest{FileName: fileName}
+	reqData, _ := json.Marshal(request)
+
+	rw := bufio.NewReadWriter(bufio.NewReader(transferStream), bufio.NewWriter(transferStream))
+	rw.WriteString(fmt.Sprintf("%s\n", reqData))
+	rw.Flush()
 
 	// Create download directory if it doesn't exist
 	downloadDir := "./received"
