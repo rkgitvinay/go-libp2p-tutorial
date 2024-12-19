@@ -256,28 +256,105 @@ func downloadFile(peerID string, fileName string) error {
 
 // Add new HTTP handler for initiating downloads
 func handleDownload(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Only POST is supported", http.StatusMethodNotAllowed)
+	if r.Method != http.MethodGet {
+		http.Error(w, "Only GET is supported", http.StatusMethodNotAllowed)
 		return
 	}
 
-	var downloadRequest struct {
-		PeerID   string `json:"peer_id"`
-		FileName string `json:"file_name"`
-	}
+	// Get parameters from URL
+	peerID := r.URL.Query().Get("peer_id")
+	fileName := r.URL.Query().Get("file_name")
 
-	if err := json.NewDecoder(r.Body).Decode(&downloadRequest); err != nil {
-		http.Error(w, "Invalid request body", http.StatusBadRequest)
+	if peerID == "" || fileName == "" {
+		http.Error(w, "Missing peer_id or filename parameter", http.StatusBadRequest)
 		return
 	}
 
-	err := downloadFile(downloadRequest.PeerID, downloadRequest.FileName)
+	// If downloading from self, serve the local file
+	if peerID == host.ID().String() {
+		filePath := filepath.Join(filesDir, fileName)
+		if _, err := os.Stat(filePath); os.IsNotExist(err) {
+			http.Error(w, "File not found", http.StatusNotFound)
+			return
+		}
+
+		// Set headers for file download
+		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%s", fileName))
+		w.Header().Set("Content-Type", "application/octet-stream")
+		http.ServeFile(w, r, filePath)
+		return
+	}
+
+	// err := downloadFile(downloadRequest.PeerID, downloadRequest.FileName)
+	// For remote peers, stream the file directly
+	err := streamFileFromPeer(w, peerID, fileName)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
 	fmt.Fprintf(w, "File downloaded successfully")
+}
+
+// Function to stream file directly from peer to HTTP response
+func streamFileFromPeer(w http.ResponseWriter, peerID string, fileName string) error {
+	// Decode peer ID
+	peerIDObj, err := peer.Decode(peerID)
+	if err != nil {
+		return fmt.Errorf("invalid peer ID: %v", err)
+	}
+
+	// Open stream for file request
+	ctx := context.Background()
+	requestStream, err := host.NewStream(ctx, peerIDObj, "/filerequest/1.0.0")
+	if err != nil {
+		return fmt.Errorf("failed to open request stream: %v", err)
+	}
+	defer requestStream.Close()
+
+	// Send file request
+	rw := bufio.NewReadWriter(bufio.NewReader(requestStream), bufio.NewWriter(requestStream))
+	request := FileRequest{FileName: fileName}
+	reqData, _ := json.Marshal(request)
+	rw.WriteString(fmt.Sprintf("%s\n", reqData))
+	rw.Flush()
+
+	// Read response
+	respData, err := rw.ReadString('\n')
+	if err != nil {
+		return fmt.Errorf("failed to read response: %v", err)
+	}
+
+	var response FileResponse
+	if err := json.Unmarshal([]byte(respData), &response); err != nil {
+		return fmt.Errorf("failed to parse response: %v", err)
+	}
+
+	if !response.Success {
+		return fmt.Errorf("peer response: %s", response.Message)
+	}
+
+	// Open stream for file transfer
+	transferStream, err := host.NewStream(ctx, peerIDObj, "/filetransfer/1.0.0")
+	if err != nil {
+		return fmt.Errorf("failed to open transfer stream: %v", err)
+	}
+	defer transferStream.Close()
+
+	// Set headers for file download
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%s", fileName))
+	w.Header().Set("Content-Type", "application/octet-stream")
+	if response.Size > 0 {
+		w.Header().Set("Content-Length", fmt.Sprintf("%d", response.Size))
+	}
+
+	// Stream the file directly to the HTTP response
+	_, err = io.Copy(w, transferStream)
+	if err != nil {
+		return fmt.Errorf("failed to stream file: %v", err)
+	}
+
+	return nil
 }
 
 func propagateGlobalMap(senderID string, updatedGlobalMap map[string][]FileMetadata) {
