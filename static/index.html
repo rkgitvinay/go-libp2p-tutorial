@@ -43,7 +43,12 @@
                 const ul = document.createElement('ul');
                 files.forEach(file => {
                     const fileLi = document.createElement('li');
-                    fileLi.textContent = `${file.name} (${file.size} bytes)`;
+                    fileLi.textContent = `${file.name} (${file.size} bytes) `;
+                    // Add download link
+                    const downloadLink = document.createElement('a');
+                    downloadLink.href = `/download?peer_id=${peer}&file_name=${file.name}`;
+                    downloadLink.textContent = 'Download';
+                    fileLi.appendChild(downloadLink);
                     ul.appendChild(fileLi);
                 });
                 li.appendChild(ul);
