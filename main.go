@@ -256,18 +256,7 @@ func handleDownload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Serve the downloaded file
-	downloadedFilePath := filepath.Join("./received", fileName)
-	if _, err := os.Stat(downloadedFilePath); os.IsNotExist(err) {
-		http.Error(w, "File not found", http.StatusNotFound)
-		return
-	}
-
-	// Set headers for file download
-	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%s", fileName))
-	w.Header().Set("Content-Type", "application/octet-stream")
-	http.ServeFile(w, r, downloadedFilePath)
-	return
+	fmt.Fprintf(w, "File downloaded successfully")
 }
 
 // Function to stream file directly from peer to HTTP response
