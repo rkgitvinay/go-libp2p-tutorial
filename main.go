@@ -248,6 +248,18 @@ func handleDownload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Check if the file exists in the local `received` directory
+	receivedDir := "./received"
+	localFilePath := filepath.Join(receivedDir, fileName)
+
+	if _, err := os.Stat(localFilePath); !os.IsNotExist(err) {
+		// Serve the file from the `received` directory
+		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%s", fileName))
+		w.Header().Set("Content-Type", "application/octet-stream")
+		http.ServeFile(w, r, localFilePath)
+		return
+	}
+
 	// For remote peers, stream the file directly
 	err := downloadFile(peerID, fileName)
 	if err != nil {
@@ -255,7 +267,15 @@ func handleDownload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	fmt.Fprintf(w, "File downloaded successfully")
+	// Serve the file from the `received` directory after downloading
+	if _, err := os.Stat(localFilePath); !os.IsNotExist(err) {
+		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%s", fileName))
+		w.Header().Set("Content-Type", "application/octet-stream")
+		http.ServeFile(w, r, localFilePath)
+		return
+	}
+
+	http.Error(w, "File download failed", http.StatusInternalServerError)
 }
 
 func propagateGlobalMap(senderID string, updatedGlobalMap map[string][]FileMetadata) {
