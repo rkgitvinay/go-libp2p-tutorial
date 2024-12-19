@@ -40,6 +40,17 @@ var (
 	filesMutex    sync.Mutex                        // Mutex to protect global file map
 )
 
+// Add these new types to handle file transfer
+type FileRequest struct {
+	FileName string `json:"filename"`
+}
+
+type FileResponse struct {
+	Success bool   `json:"success"`
+	Message string `json:"message"`
+	Size    int64  `json:"size,omitempty"`
+}
+
 func handleStream(s network.Stream) {
 	log.Printf("Established stream with peer: %s\n", s.Conn().RemotePeer().String())
 
@@ -74,6 +85,191 @@ func handleStream(s network.Stream) {
 			}
 		}
 	}()
+}
+
+// Handle incoming file requests
+func handleFileRequest(s network.Stream) {
+	rw := bufio.NewReadWriter(bufio.NewReader(s), bufio.NewWriter(s))
+
+	// Read the file request
+	reqData, err := rw.ReadString('\n')
+	if err != nil {
+		log.Printf("Error reading file request: %v", err)
+		s.Close()
+		return
+	}
+
+	var fileReq FileRequest
+	if err := json.Unmarshal([]byte(reqData), &fileReq); err != nil {
+		log.Printf("Error unmarshaling file request: %v", err)
+		s.Close()
+		return
+	}
+
+	// Check if we have the file
+	filePath := filepath.Join(filesDir, fileReq.FileName)
+	fileInfo, err := os.Stat(filePath)
+
+	response := FileResponse{}
+	if err != nil {
+		response.Success = false
+		response.Message = "File not found"
+	} else {
+		response.Success = true
+		response.Message = "File found"
+		response.Size = fileInfo.Size()
+	}
+
+	// Send response
+	respData, _ := json.Marshal(response)
+	rw.WriteString(fmt.Sprintf("%s\n", respData))
+	rw.Flush()
+
+	s.Close()
+}
+
+// Handle actual file transfer
+func handleFileTransfer(s network.Stream) {
+	// Read the file request first
+	rw := bufio.NewReadWriter(bufio.NewReader(s), bufio.NewWriter(s))
+
+	reqData, err := rw.ReadString('\n')
+	if err != nil {
+		log.Printf("Error reading file request: %v", err)
+		s.Close()
+		return
+	}
+
+	var fileReq FileRequest
+	if err := json.Unmarshal([]byte(reqData), &fileReq); err != nil {
+		log.Printf("Error unmarshaling file request: %v", err)
+		s.Close()
+		return
+	}
+
+	// Open the requested file
+	filePath := filepath.Join(filesDir, fileReq.FileName)
+	file, err := os.Open(filePath)
+	if err != nil {
+		log.Printf("Error opening file: %v", err)
+		s.Close()
+		return
+	}
+	defer file.Close()
+
+	// Send the file content
+	_, err = io.Copy(s, file)
+	if err != nil {
+		log.Printf("Error sending file: %v", err)
+	}
+
+	s.Close()
+}
+
+// Function to download a file from a peer
+func downloadFile(peerID string, fileName string) error {
+	// Find peer info
+	peerIDObj, err := peer.Decode(peerID)
+	if err != nil {
+		return fmt.Errorf("invalid peer ID: %v", err)
+	}
+
+	// Open stream for file transfer
+	ctx := context.Background()
+	transferStream, err := host.NewStream(ctx, peerIDObj, "/filetransfer/1.0.0")
+	if err != nil {
+		return fmt.Errorf("failed to open transfer stream: %v", err)
+	}
+	defer transferStream.Close()
+
+	// Send file request
+	request := FileRequest{FileName: fileName}
+	reqData, _ := json.Marshal(request)
+
+	rw := bufio.NewReadWriter(bufio.NewReader(transferStream), bufio.NewWriter(transferStream))
+	rw.WriteString(fmt.Sprintf("%s\n", reqData))
+	rw.Flush()
+
+	// Create download directory if it doesn't exist
+	downloadDir := "./received"
+	os.MkdirAll(downloadDir, os.ModePerm)
+
+	// Create the file
+	filePath := filepath.Join(downloadDir, fileName)
+	file, err := os.Create(filePath)
+	if err != nil {
+		return fmt.Errorf("failed to create file: %v", err)
+	}
+	defer file.Close()
+
+	// Receive the file
+	_, err = io.Copy(file, transferStream)
+	if err != nil {
+		return fmt.Errorf("failed to save file: %v", err)
+	}
+
+	return nil
+}
+
+// Add new HTTP handler for initiating downloads
+func handleDownload(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Only GET is supported", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Get parameters from URL
+	peerID := r.URL.Query().Get("peer_id")
+	fileName := r.URL.Query().Get("file_name")
+
+	if peerID == "" || fileName == "" {
+		http.Error(w, "Missing peer_id or filename parameter", http.StatusBadRequest)
+		return
+	}
+
+	// If downloading from self, serve the local file
+	if peerID == host.ID().String() {
+		filePath := filepath.Join(filesDir, fileName)
+		if _, err := os.Stat(filePath); os.IsNotExist(err) {
+			http.Error(w, "File not found", http.StatusNotFound)
+			return
+		}
+
+		// Set headers for file download
+		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%s", fileName))
+		w.Header().Set("Content-Type", "application/octet-stream")
+		http.ServeFile(w, r, filePath)
+		return
+	}
+
+	// Check if the file exists in the local `received` directory
+	receivedDir := "./received"
+	localFilePath := filepath.Join(receivedDir, fileName)
+
+	if _, err := os.Stat(localFilePath); !os.IsNotExist(err) {
+		// Serve the file from the `received` directory
+		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%s", fileName))
+		w.Header().Set("Content-Type", "application/octet-stream")
+		http.ServeFile(w, r, localFilePath)
+		return
+	}
+
+	// For remote peers, stream the file directly
+	err := downloadFile(peerID, fileName)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Serve the file from the `received` directory after downloading
+	if _, err := os.Stat(localFilePath); !os.IsNotExist(err) {
+		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%s", fileName))
+		w.Header().Set("Content-Type", "application/octet-stream")
+		http.ServeFile(w, r, localFilePath)
+		return
+	}
+
+	http.Error(w, "File download failed", http.StatusInternalServerError)
 }
 
 func propagateGlobalMap(senderID string, updatedGlobalMap map[string][]FileMetadata) {
@@ -288,6 +484,8 @@ func startWebInterface(port int) {
 	http.HandleFunc("/peers", getGlobalMap)
 	http.HandleFunc("/global", getGlobalMap) // New endpoint
 
+	http.HandleFunc("/download", handleDownload)
+
 	addr := fmt.Sprintf(":%d", port)
 	log.Printf("Starting web interface at http://localhost%s\n", addr)
 	log.Fatal(http.ListenAndServe(addr, nil))
@@ -326,6 +524,10 @@ func main() {
 
 	// Set stream handler for the file-sharing protocol
 	host.SetStreamHandler("/fileshare/1.0.0", handleStream)
+
+	// Add these new protocol handlers
+	host.SetStreamHandler("/filerequest/1.0.0", handleFileRequest)
+	host.SetStreamHandler("/filetransfer/1.0.0", handleFileTransfer)
 
 	// Connect to destination peer if provided
 	if *dest != "" {
