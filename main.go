@@ -152,43 +152,6 @@ func handleFileTransfer(s network.Stream) {
 
 // Function to download a file from a peer
 func downloadFile(peerID string, fileName string) error {
-
-	// First check if trying to download from self
-	if peerID == host.ID().String() {
-		// If it's a local file, just copy it to downloads directory
-		sourcePath := filepath.Join(filesDir, fileName)
-		downloadDir := "./received"
-		targetPath := filepath.Join(downloadDir, fileName)
-
-		// Check if source file exists
-		if _, err := os.Stat(sourcePath); os.IsNotExist(err) {
-			return fmt.Errorf("file not found in local shared directory")
-		}
-
-		// Create downloads directory if it doesn't exist
-		os.MkdirAll(downloadDir, os.ModePerm)
-
-		// Copy the file
-		source, err := os.Open(sourcePath)
-		if err != nil {
-			return fmt.Errorf("failed to open source file: %v", err)
-		}
-		defer source.Close()
-
-		destination, err := os.Create(targetPath)
-		if err != nil {
-			return fmt.Errorf("failed to create destination file: %v", err)
-		}
-		defer destination.Close()
-
-		_, err = io.Copy(destination, source)
-		if err != nil {
-			return fmt.Errorf("failed to copy file: %v", err)
-		}
-
-		return nil
-	}
-
 	// Find peer info
 	peerIDObj, err := peer.Decode(peerID)
 	if err != nil {
@@ -285,9 +248,9 @@ func handleDownload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// err := downloadFile(downloadRequest.PeerID, downloadRequest.FileName)
+	err := downloadFile(peerID, fileName)
 	// For remote peers, stream the file directly
-	err := streamFileFromPeer(w, peerID, fileName)
+	// err := streamFileFromPeer(w, peerID, fileName)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
