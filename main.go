@@ -248,76 +248,14 @@ func handleDownload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err := downloadFile(peerID, fileName)
 	// For remote peers, stream the file directly
-	// err := streamFileFromPeer(w, peerID, fileName)
+	err := downloadFile(peerID, fileName)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
 	fmt.Fprintf(w, "File downloaded successfully")
-}
-
-// Function to stream file directly from peer to HTTP response
-func streamFileFromPeer(w http.ResponseWriter, peerID string, fileName string) error {
-	// Decode peer ID
-	peerIDObj, err := peer.Decode(peerID)
-	if err != nil {
-		return fmt.Errorf("invalid peer ID: %v", err)
-	}
-
-	// Open stream for file request
-	ctx := context.Background()
-	requestStream, err := host.NewStream(ctx, peerIDObj, "/filerequest/1.0.0")
-	if err != nil {
-		return fmt.Errorf("failed to open request stream: %v", err)
-	}
-	defer requestStream.Close()
-
-	// Send file request
-	rw := bufio.NewReadWriter(bufio.NewReader(requestStream), bufio.NewWriter(requestStream))
-	request := FileRequest{FileName: fileName}
-	reqData, _ := json.Marshal(request)
-	rw.WriteString(fmt.Sprintf("%s\n", reqData))
-	rw.Flush()
-
-	// Read response
-	respData, err := rw.ReadString('\n')
-	if err != nil {
-		return fmt.Errorf("failed to read response: %v", err)
-	}
-
-	var response FileResponse
-	if err := json.Unmarshal([]byte(respData), &response); err != nil {
-		return fmt.Errorf("failed to parse response: %v", err)
-	}
-
-	if !response.Success {
-		return fmt.Errorf("peer response: %s", response.Message)
-	}
-
-	// Open stream for file transfer
-	transferStream, err := host.NewStream(ctx, peerIDObj, "/filetransfer/1.0.0")
-	if err != nil {
-		return fmt.Errorf("failed to open transfer stream: %v", err)
-	}
-	defer transferStream.Close()
-
-	// Set headers for file download
-	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%s", fileName))
-	w.Header().Set("Content-Type", "application/octet-stream")
-	if response.Size > 0 {
-		w.Header().Set("Content-Length", fmt.Sprintf("%d", response.Size))
-	}
-
-	// Stream the file directly to the HTTP response
-	_, err = io.Copy(w, transferStream)
-	if err != nil {
-		return fmt.Errorf("failed to stream file: %v", err)
-	}
-
-	return nil
 }
 
 func propagateGlobalMap(senderID string, updatedGlobalMap map[string][]FileMetadata) {
