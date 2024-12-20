@@ -24,8 +24,9 @@ import (
 )
 
 type FileMetadata struct {
-	Name string `json:"name"`
-	Size int64  `json:"size"`
+	Name    string `json:"name"`
+	Size    int64  `json:"size"`
+	Address string `json:"address"`
 }
 
 var (
@@ -175,7 +176,27 @@ func handleDownload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err := streamFileToClient(w, peerID, fileName)
+	// find file metadata in global map
+	filesMutex.Lock()
+	peerFiles, ok := globalFileMap[peerID]
+	filesMutex.Unlock()
+	if !ok {
+		http.Error(w, "Peer not found", http.StatusNotFound)
+		return
+	}
+
+	// Find the file metadata
+	var fileMetadata FileMetadata
+	for _, file := range peerFiles {
+		if file.Name == fileName {
+			fileMetadata = file
+			break
+		}
+	}
+
+	peerAddress := fileMetadata.Address + "/p2p/" + peerID
+
+	err := streamFileToClient(w, peerAddress, fileName)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -183,12 +204,31 @@ func handleDownload(w http.ResponseWriter, r *http.Request) {
 }
 
 // New function to stream file directly to HTTP client
-func streamFileToClient(w http.ResponseWriter, peerID string, fileName string) error {
+func streamFileToClient(w http.ResponseWriter, peerAddr string, fileName string) error {
+	// Parse the multiaddress of the peer
+	maddr, err := multiaddr.NewMultiaddr(peerAddr)
+	if err != nil {
+		return fmt.Errorf("invalid multiaddress: %v", err)
+	}
+	fmt.Println("maddr", maddr)
+
+	// Extract the peer information from the multiaddress
+	peerInfo, err := peer.AddrInfoFromP2pAddr(maddr)
+	if err != nil {
+		return fmt.Errorf("failed to parse peer address: %v", err)
+	}
+	fmt.Println("peerInfo", peerInfo)
+
+	// Add the peer's address to the peerstore
+	host.Peerstore().AddAddrs(peerInfo.ID, peerInfo.Addrs, peerstore.PermanentAddrTTL)
+
 	// Find peer info
-	peerIDObj, err := peer.Decode(peerID)
+	peerIDObj, err := peer.Decode(peerInfo.ID.String())
 	if err != nil {
 		return fmt.Errorf("invalid peer ID: %v", err)
 	}
+
+	fmt.Println("peerIDObj", peerIDObj)
 
 	// Open stream for file transfer
 	ctx := context.Background()
@@ -393,7 +433,7 @@ func uploadFile(w http.ResponseWriter, r *http.Request) {
 
 	// Add to local files
 	filesMutex.Lock()
-	localFiles = append(localFiles, FileMetadata{Name: header.Filename, Size: size})
+	localFiles = append(localFiles, FileMetadata{Name: header.Filename, Size: size, Address: host.Addrs()[0].String()})
 	globalFileMap[host.ID().String()] = localFiles
 	filesMutex.Unlock()
 
