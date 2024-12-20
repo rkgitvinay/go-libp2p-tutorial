@@ -190,6 +190,10 @@ func streamFileToClient(w http.ResponseWriter, peerID string, fileName string) e
 		return fmt.Errorf("invalid peer ID: %v", err)
 	}
 
+	// get the peer's address from the peerstore
+	peerAddr := host.Peerstore().Addrs(peerIDObj)[0]
+	fmt.Println("Reqeuested Peer address:", peerAddr)
+
 	// Open stream for file transfer
 	ctx := context.Background()
 	transferStream, err := host.NewStream(ctx, peerIDObj, "/filetransfer/1.0.0")
@@ -464,6 +468,9 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
+
+	// store our own address in the peerstore so that other nodes can find us
+	host.Peerstore().AddAddr(host.ID(), sourceMultiAddr, peerstore.PermanentAddrTTL)
 
 	fmt.Printf("Node started with ID: %s\n", host.ID())
 	fmt.Println("Listening on addresses:")
