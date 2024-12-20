@@ -3,12 +3,11 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/rand"
 	"encoding/json"
-	"encoding/pem"
 	"flag"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"log"
 	"net/http"
 	"os"
@@ -39,10 +38,6 @@ var (
 var (
 	globalFileMap = make(map[string][]FileMetadata) // Global map of peer ID to their files
 	filesMutex    sync.Mutex                        // Mutex to protect global file map
-)
-
-const (
-	privateName = "priv.pem"
 )
 
 // Add these new types to handle file transfer
@@ -488,67 +483,16 @@ func startWebInterface(port int) {
 	log.Fatal(http.ListenAndServe(addr, nil))
 }
 
-/**
- *
- * pem is used to generate a fixed private key
- * there no need to do it when starting a host
- * but as result the peer id would change
- * for perpose of testing, it is serious recommended
- * to add it.
- */
-func loadFromPem() (crypto.PrivKey, error) {
-	pwd, _ := os.Getwd()
-	filePath := fmt.Sprintf("%s/%s", pwd, privateName)
-	bytes, err := ioutil.ReadFile(filePath)
-	if err != nil {
-		return nil, err
-	}
-	block, _ := pem.Decode(bytes)
-	priv, _ := crypto.UnmarshalPrivateKey(block.Bytes)
-	return priv, nil
-}
-
-func exportToPem(priv crypto.PrivKey) error {
-	privBytes, err := crypto.MarshalPrivateKey(priv)
-	if err != nil {
-		fmt.Printf("marshal private key error: %s \n", err)
-		return err
-	}
-	privPem := pem.EncodeToMemory(
-		&pem.Block{
-			Type:  "Ed25519 PRIVATE KEY",
-			Bytes: privBytes,
-		},
-	)
-	ioutil.WriteFile(privateName, []byte(privPem), 0644)
-	return nil
-}
-
-func getOrGeneratePrivateKey() (crypto.PrivKey, error) {
-	priv, err := loadFromPem()
-	if err != nil {
-		priv, _, err = crypto.GenerateKeyPair(crypto.Ed25519, -1)
-		if err != nil {
-			panic(err)
-		}
-		err = exportToPem(priv)
-		if err != nil {
-			fmt.Printf("export private key error: %s \n", err)
-		}
-	}
-	return priv, nil
-}
-
 func main() {
 	sourcePort := flag.Int("sp", 0, "Source port number")
 	dest := flag.String("d", "", "Destination multiaddr string")
 	port := flag.Int("port", 8080, "Port for the web interface")
 	flag.Parse()
 
-	// var r io.Reader
-	// r = rand.Reader
+	var r io.Reader
+	r = rand.Reader
 
-	prvKey, err := getOrGeneratePrivateKey()
+	prvKey, _, err := crypto.GenerateKeyPairWithReader(crypto.RSA, 2048, r)
 	if err != nil {
 		panic(err)
 	}
