@@ -331,17 +331,52 @@ func connectToPeer(peerAddr string) error {
 		return fmt.Errorf("failed to parse peer address: %v", err)
 	}
 
+	// Add addresses to peerstore with a longer TTL
 	host.Peerstore().AddAddrs(info.ID, info.Addrs, peerstore.PermanentAddrTTL)
 
-	// Open a stream to the peer
-	s, err := host.NewStream(context.Background(), info.ID, "/fileshare/1.0.0")
-	if err != nil {
-		return fmt.Errorf("failed to create stream: %v", err)
+	log.Printf("Added peer %s to peerstore with addresses: %v", info.ID, info.Addrs)
+
+	// Try to connect
+	ctx := context.Background()
+	if err := host.Connect(ctx, *info); err != nil {
+		return fmt.Errorf("failed to connect: %v", err)
 	}
 
-	// Handle the stream
-	handleStream(s)
+	log.Printf("Successfully connected to peer %s", info.ID)
+
+	// After connecting, exchange peer information
+	exchangePeerInfo(info.ID)
+
 	return nil
+}
+
+// Add this new function to exchange peer information
+func exchangePeerInfo(peerID peer.ID) {
+	stream, err := host.NewStream(context.Background(), peerID, "/peer-discovery/1.0.0")
+	if err != nil {
+		log.Printf("Failed to open peer info exchange stream: %v", err)
+		return
+	}
+	defer stream.Close()
+
+	// Send our known peers
+	rw := bufio.NewReadWriter(bufio.NewReader(stream), bufio.NewWriter(stream))
+	peerList := make(map[string][]string)
+
+	for _, p := range host.Peerstore().Peers() {
+		addrs := host.Peerstore().Addrs(p)
+		addrStrings := make([]string, len(addrs))
+		for i, addr := range addrs {
+			addrStrings[i] = addr.String()
+		}
+		peerList[p.String()] = addrStrings
+	}
+
+	peerListBytes, _ := json.Marshal(peerList)
+	rw.WriteString(fmt.Sprintf("%s\n", peerListBytes))
+	rw.Flush()
+
+	log.Printf("Sent peer information to %s", peerID)
 }
 
 func readData(rw *bufio.ReadWriter) {
@@ -517,9 +552,25 @@ func ensureConnectedToPeer(peerID string) error {
 	return fmt.Errorf("could not find or connect to peer")
 }
 
+// Add this function to help with debugging
+func logPeerConnections() {
+	log.Printf("=== Current Peer Connections ===")
+	for _, conn := range host.Network().Conns() {
+		log.Printf("Connected to: %s", conn.RemotePeer().String())
+		log.Printf("Connection addresses: %v", conn.RemoteMultiaddr())
+	}
+	log.Printf("==============================")
+}
+
 // Add this new protocol handler in main()
 func handlePeerDiscovery(s network.Stream) {
 	rw := bufio.NewReadWriter(bufio.NewReader(s), bufio.NewWriter(s))
+
+	log.Printf("All peers in peerstore:")
+	for _, p := range host.Peerstore().Peers() {
+		addrs := host.Peerstore().Addrs(p)
+		log.Printf("Peer %s has addresses: %v", p.String(), addrs)
+	}
 
 	// Read requested peer ID
 	requestedPeer, err := rw.ReadString('\n')
@@ -577,6 +628,12 @@ func main() {
 
 	go startWebInterface(*port)
 
+	// Add debug logging for protocols
+	log.Printf("Registered protocols:")
+	for _, p := range host.Mux().Protocols() {
+		log.Printf("- %s", p)
+	}
+
 	// Set stream handler for the file-sharing protocol
 	host.SetStreamHandler("/fileshare/1.0.0", handleStream)
 
@@ -593,6 +650,8 @@ func main() {
 			log.Fatalf("Failed to connect to peer: %v", err)
 		}
 	}
+
+	logPeerConnections()
 
 	select {}
 }
