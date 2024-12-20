@@ -173,6 +173,44 @@ func handleFileTransfer(s network.Stream) {
 	s.Close()
 }
 
+// Function to download a file from a peer
+func downloadFile(peerID string, fileName string) error {
+	// Find peer info
+	peerIDObj, err := peer.Decode(peerID)
+	if err != nil {
+		return fmt.Errorf("invalid peer ID: %v", err)
+	}
+	// Open stream for file transfer
+	ctx := context.Background()
+	transferStream, err := host.NewStream(ctx, peerIDObj, "/filetransfer/1.0.0")
+	if err != nil {
+		return fmt.Errorf("failed to open transfer stream: %v", err)
+	}
+	defer transferStream.Close()
+	// Send file request
+	request := FileRequest{FileName: fileName}
+	reqData, _ := json.Marshal(request)
+	rw := bufio.NewReadWriter(bufio.NewReader(transferStream), bufio.NewWriter(transferStream))
+	rw.WriteString(fmt.Sprintf("%s\n", reqData))
+	rw.Flush()
+	// Create download directory if it doesn't exist
+	downloadDir := "./received"
+	os.MkdirAll(downloadDir, os.ModePerm)
+	// Create the file
+	filePath := filepath.Join(downloadDir, fileName)
+	file, err := os.Create(filePath)
+	if err != nil {
+		return fmt.Errorf("failed to create file: %v", err)
+	}
+	defer file.Close()
+	// Receive the file
+	_, err = io.Copy(file, transferStream)
+	if err != nil {
+		return fmt.Errorf("failed to save file: %v", err)
+	}
+	return nil
+}
+
 // Add new HTTP handler for initiating downloads
 func handleDownload(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
@@ -216,11 +254,17 @@ func handleDownload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err := streamFileToClient(w, peerID, fileName)
+	err := downloadFile(peerID, fileName)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+
+	// err := streamFileToClient(w, peerID, fileName)
+	// if err != nil {
+	// 	http.Error(w, err.Error(), http.StatusInternalServerError)
+	// 	return
+	// }
 }
 
 // New function to stream file directly to HTTP client
