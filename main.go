@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"github.com/libp2p/go-libp2p"
@@ -225,6 +226,11 @@ func handleDownload(w http.ResponseWriter, r *http.Request) {
 
 // New function to stream file directly to HTTP client
 func streamFileToClient(w http.ResponseWriter, peerID string, fileName string) error {
+	// Ensure we're connected to the peer
+	if err := ensureConnectedToPeer(peerID); err != nil {
+		return fmt.Errorf("failed to connect to peer: %v", err)
+	}
+
 	// Find peer info
 	peerIDObj, err := peer.Decode(peerID)
 	if err != nil {
@@ -483,6 +489,113 @@ func startWebInterface(port int) {
 	log.Fatal(http.ListenAndServe(addr, nil))
 }
 
+// Add this new function to establish connection if not already connected
+func ensureConnectedToPeer(peerIDStr string) error {
+	// Decode the peer ID
+	peerID, err := peer.Decode(peerIDStr)
+	if err != nil {
+		return fmt.Errorf("invalid peer ID: %v", err)
+	}
+
+	// Check if we're already connected
+	if host.Network().Connectedness(peerID) == network.Connected {
+		return nil
+	}
+
+	// Get peer info from the peerstore
+	peerInfo := host.Peerstore().PeerInfo(peerID)
+	if len(peerInfo.Addrs) == 0 {
+		// If we don't have the peer's addresses, we need to get them from connected peers
+		for _, conn := range host.Network().Conns() {
+			// Skip if this is the peer we're looking for
+			if conn.RemotePeer() == peerID {
+				continue
+			}
+
+			// Ask this peer for the target peer's addresses
+			stream, err := host.NewStream(context.Background(), conn.RemotePeer(), "/peer-discovery/1.0.0")
+			if err != nil {
+				continue
+			}
+			defer stream.Close()
+
+			// Send the peer ID we're looking for
+			rw := bufio.NewReadWriter(bufio.NewReader(stream), bufio.NewWriter(stream))
+			rw.WriteString(peerIDStr + "\n")
+			rw.Flush()
+
+			// Read the response
+			response, err := rw.ReadString('\n')
+			if err != nil {
+				continue
+			}
+
+			// Parse the multiaddresses
+			var addrs []string
+			if err := json.Unmarshal([]byte(response), &addrs); err != nil {
+				continue
+			}
+
+			// Convert string addresses to multiaddrs
+			for _, addr := range addrs {
+				maddr, err := multiaddr.NewMultiaddr(addr)
+				if err != nil {
+					continue
+				}
+				peerInfo.Addrs = append(peerInfo.Addrs, maddr)
+			}
+
+			if len(peerInfo.Addrs) > 0 {
+				break
+			}
+		}
+	}
+
+	if len(peerInfo.Addrs) == 0 {
+		return fmt.Errorf("no addresses found for peer %s", peerIDStr)
+	}
+
+	// Try to connect to the peer
+	ctx := context.Background()
+	if err := host.Connect(ctx, peerInfo); err != nil {
+		return fmt.Errorf("failed to connect to peer: %v", err)
+	}
+
+	return nil
+}
+
+// Add a new protocol handler for peer discovery
+func handlePeerDiscovery(stream network.Stream) {
+	rw := bufio.NewReadWriter(bufio.NewReader(stream), bufio.NewWriter(stream))
+
+	// Read the requested peer ID
+	requestedPeerID, err := rw.ReadString('\n')
+	if err != nil {
+		stream.Close()
+		return
+	}
+	requestedPeerID = strings.TrimSpace(requestedPeerID)
+
+	// Find the peer's addresses in our peerstore
+	peerID, err := peer.Decode(requestedPeerID)
+	if err != nil {
+		stream.Close()
+		return
+	}
+
+	peerInfo := host.Peerstore().PeerInfo(peerID)
+	addrs := make([]string, 0)
+	for _, addr := range peerInfo.Addrs {
+		addrs = append(addrs, addr.String())
+	}
+
+	// Send back the addresses
+	addrJSON, _ := json.Marshal(addrs)
+	rw.WriteString(string(addrJSON) + "\n")
+	rw.Flush()
+	stream.Close()
+}
+
 func main() {
 	sourcePort := flag.Int("sp", 0, "Source port number")
 	dest := flag.String("d", "", "Destination multiaddr string")
@@ -520,6 +633,8 @@ func main() {
 	// Add these new protocol handlers
 	host.SetStreamHandler("/filerequest/1.0.0", handleFileRequest)
 	host.SetStreamHandler("/filetransfer/1.0.0", handleFileTransfer)
+
+	host.SetStreamHandler("/peer-discovery/1.0.0", handlePeerDiscovery)
 
 	// Connect to destination peer if provided
 	if *dest != "" {
