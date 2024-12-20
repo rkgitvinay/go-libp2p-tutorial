@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"github.com/libp2p/go-libp2p"
@@ -402,6 +403,19 @@ func writeData(rw *bufio.ReadWriter) {
 	}
 }
 
+func getPublicIP() string {
+	resp, err := http.Get("https://api.ipify.org?format=text") // Get public IP
+	if err != nil {
+		log.Fatalf("Failed to get public IP: %v", err)
+	}
+	defer resp.Body.Close()
+	ip, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.Fatalf("Failed to read response body: %v", err)
+	}
+	return string(ip)
+}
+
 func uploadFile(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Only POST is supported", http.StatusMethodNotAllowed)
@@ -431,9 +445,17 @@ func uploadFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Replace host ip with localhost
+	publicIp := getPublicIP()
+	hostAddr := host.Addrs()[0].String()
+	parts := strings.Split(hostAddr, "/")
+	port := parts[len(parts)-1] // Get the last part
+
+	peerAddress := "/ip4/" + publicIp + "/tcp/" + port
+
 	// Add to local files
 	filesMutex.Lock()
-	localFiles = append(localFiles, FileMetadata{Name: header.Filename, Size: size, Address: host.Addrs()[0].String()})
+	localFiles = append(localFiles, FileMetadata{Name: header.Filename, Size: size, Address: peerAddress})
 	globalFileMap[host.ID().String()] = localFiles
 	filesMutex.Unlock()
 
