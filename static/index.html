@@ -1,23 +1,151 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>P2P File Sharing</title>
     <style>
-        body { font-family: Arial, sans-serif; }
-        #files, #peers { margin: 20px 0; }
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 0;
+            background: #f4f4f9;
+            color: #333;
+            line-height: 1.6;
+        }
+
+        header {
+            background: #4CAF50;
+            color: #fff;
+            padding: 10px 15px;
+            text-align: center;
+        }
+
+        main {
+            padding: 20px;
+            max-width: 800px;
+            margin: auto;
+        }
+
+        h1, h2 {
+            margin-bottom: 10px;
+        }
+
+        form {
+            background: #fff;
+            padding: 15px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+        }
+
+        button {
+            background: #4CAF50;
+            color: white;
+            border: none;
+            padding: 10px 15px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 16px;
+        }
+
+        button:hover {
+            background: #45a049;
+        }
+
+        .list-container {
+            max-height: 300px;
+            overflow-y: auto;
+            border: 1px solid #ddd;
+            background: #fff;
+            padding: 10px;
+            border-radius: 5px;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+        }
+
+        ul {
+            list-style: none;
+            padding: 0;
+            margin: 0;
+        }
+
+        ul li {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 5px 10px;
+            border-bottom: 1px solid #ddd;
+        }
+
+        ul li:last-child {
+            border-bottom: none;
+        }
+
+        ul li a {
+            text-decoration: none;
+            color: #4CAF50;
+            font-size: 14px;
+        }
+
+        ul li a:hover {
+            text-decoration: underline;
+        }
+
+        .peer-section {
+            margin-bottom: 15px;
+        }
+
+        .peer-title {
+            font-size: 16px;
+            font-weight: bold;
+            color: #4CAF50;
+            margin: 10px 0;
+            text-align: left;
+            padding: 0;
+        }
+
+        .content {
+            display: block;
+            margin-left: 10px;
+        }
+
+        footer {
+            text-align: center;
+            margin-top: 20px;
+            padding: 10px;
+            background: #f4f4f4;
+            border-top: 1px solid #ddd;
+        }
     </style>
 </head>
 <body>
-    <h1>P2P File Sharing</h1>
-    <h2>Upload File</h2>
-    <form id="uploadForm">
-        <input type="file" name="file" required />
-        <button type="submit">Upload</button>
-    </form>
-    <h2>Local Files</h2>
-    <ul id="files"></ul>
-    <h2>Peers and Their Files</h2>
-    <ul id="peers"></ul>
+    <header>
+        <h1>P2P File Sharing</h1>
+    </header>
+    <main>
+        <section>
+            <h2>Upload File</h2>
+            <form id="uploadForm">
+                <input type="file" name="file" required />
+                <button type="submit">Upload</button>
+            </form>
+        </section>
+
+        <section>
+            <h2>Local Files</h2>
+            <div class="list-container">
+                <ul id="files"></ul>
+            </div>
+        </section>
+
+        <section>
+            <h2>Peers and Their Files</h2>
+            <div id="peers" class="list-container"></div>
+        </section>
+    </main>
+    <footer>
+        <p>&copy; 2024 P2P File Sharing. All rights reserved.</p>
+    </footer>
 
     <script>
         async function fetchFiles() {
@@ -38,21 +166,32 @@
             const peerList = document.getElementById('peers');
             peerList.innerHTML = '';
             for (const [peer, files] of Object.entries(peers)) {
-                const li = document.createElement('li');
-                li.textContent = `Peer: ${peer}`;
+                const peerSection = document.createElement('div');
+                peerSection.classList.add('peer-section');
+
+                const peerTitle = document.createElement('div');
+                peerTitle.classList.add('peer-title');
+                peerTitle.textContent = `Peer: ${peer}`;
+
+                const content = document.createElement('div');
+                content.classList.add('content');
+
                 const ul = document.createElement('ul');
                 files.forEach(file => {
                     const fileLi = document.createElement('li');
                     fileLi.textContent = `${file.name} (${file.size} bytes) `;
-                    // Add download link
                     const downloadLink = document.createElement('a');
                     downloadLink.href = `/download?peer_id=${peer}&file_name=${file.name}`;
                     downloadLink.textContent = 'Download';
                     fileLi.appendChild(downloadLink);
                     ul.appendChild(fileLi);
                 });
-                li.appendChild(ul);
-                peerList.appendChild(li);
+
+                content.appendChild(ul);
+                peerSection.appendChild(peerTitle);
+                peerSection.appendChild(content);
+
+                peerList.appendChild(peerSection);
             }
         }
 
@@ -65,7 +204,7 @@
 
         fetchFiles();
         fetchPeers();
-        setInterval(fetchPeers, 5000); // Refresh peer data every 5 seconds
+        setInterval(fetchPeers, 5000);
     </script>
 </body>
 </html>
