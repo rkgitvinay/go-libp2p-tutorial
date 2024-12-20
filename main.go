@@ -87,47 +87,6 @@ func handleStream(s network.Stream) {
 	}()
 }
 
-// Handle incoming file requests
-func handleFileRequest(s network.Stream) {
-	rw := bufio.NewReadWriter(bufio.NewReader(s), bufio.NewWriter(s))
-
-	// Read the file request
-	reqData, err := rw.ReadString('\n')
-	if err != nil {
-		log.Printf("Error reading file request: %v", err)
-		s.Close()
-		return
-	}
-
-	var fileReq FileRequest
-	if err := json.Unmarshal([]byte(reqData), &fileReq); err != nil {
-		log.Printf("Error unmarshaling file request: %v", err)
-		s.Close()
-		return
-	}
-
-	// Check if we have the file
-	filePath := filepath.Join(filesDir, fileReq.FileName)
-	fileInfo, err := os.Stat(filePath)
-
-	response := FileResponse{}
-	if err != nil {
-		response.Success = false
-		response.Message = "File not found"
-	} else {
-		response.Success = true
-		response.Message = "File found"
-		response.Size = fileInfo.Size()
-	}
-
-	// Send response
-	respData, _ := json.Marshal(response)
-	rw.WriteString(fmt.Sprintf("%s\n", respData))
-	rw.Flush()
-
-	s.Close()
-}
-
 // Handle actual file transfer
 func handleFileTransfer(s network.Stream) {
 	rw := bufio.NewReadWriter(bufio.NewReader(s), bufio.NewWriter(s))
@@ -518,7 +477,6 @@ func main() {
 	host.SetStreamHandler("/fileshare/1.0.0", handleStream)
 
 	// Add these new protocol handlers
-	host.SetStreamHandler("/filerequest/1.0.0", handleFileRequest)
 	host.SetStreamHandler("/filetransfer/1.0.0", handleFileTransfer)
 
 	// Connect to destination peer if provided
